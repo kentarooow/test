@@ -12,7 +12,7 @@ const msalInstance = new ConfidentialClientApplication({
 });
 
 async function refreshAccessToken(refreshToken: string) {
-  console.log("🔄 Starting token refresh with refreshToken:", refreshToken);
+  console.log("🔄 Refreshing access token with refreshToken:", refreshToken);
 
   try {
     const response = await msalInstance.acquireTokenByRefreshToken({
@@ -30,7 +30,7 @@ async function refreshAccessToken(refreshToken: string) {
       expiresAt: response.expiresOn?.getTime() ?? Date.now() + 3600 * 1000,
     };
   } catch (error) {
-    console.error("❌ refreshAccessToken error:", error);
+    console.error("❌ Error refreshing access token:", error);
     return null;
   }
 }
@@ -45,7 +45,11 @@ export const authConfig: NextAuthConfig = {
       clientId: process.env.AUTH_MICROSOFT_ENTRA_ID_CLIENT_ID!,
       clientSecret: process.env.AUTH_MICROSOFT_ENTRA_ID_CLIENT_SECRET!,
       issuer: `https://login.microsoftonline.com/${process.env.AUTH_MICROSOFT_ENTRA_ID_TENANT_ID}/v2.0`,
-      authorization: { params: { scope: "openid profile email offline_access" } },
+      authorization: {
+        params: {
+          scope: "openid profile email offline_access",
+        },
+      },
     }),
   ],
 
@@ -55,39 +59,36 @@ export const authConfig: NextAuthConfig = {
 
   callbacks: {
     async signIn({ user, profile }) {
-      console.log("🚪 signIn callback triggered");
+      console.log("🚪 [signIn] triggered");
       console.log("👤 user:", user);
       console.log("📄 profile:", profile);
 
       try {
-        const resolvedEmail =
+        let resolvedEmail =
           user.email || profile?.email || profile?.preferred_username;
 
-        console.log("📧 resolvedEmail:", resolvedEmail);
-
         if (!resolvedEmail) {
-          console.warn("⚠️ Email not resolved, allowing login for debug");
-          return true;
+          console.warn("⚠️ resolvedEmail is undefined! Using fallback email");
+          resolvedEmail = "unknown@example.com";
         }
 
-        const apiUrl = `${process.env.BASE_API_URL_PYTHON}/get_employee_callback?employee_address=${resolvedEmail}`;
-        console.log("🌐 Calling backend API:", apiUrl);
+        const apiUrl = `${process.env.BASE_API_URL_PYTHON}/get_employee_callback?employee_address=${encodeURIComponent(resolvedEmail)}`;
+        console.log("🌐 Backend API URL:", apiUrl);
 
         const res = await fetch(apiUrl);
-
-        console.log("📡 API response status:", res.status);
+        console.log("📡 Backend response status:", res.status);
 
         if (!res.ok) {
           const text = await res.text();
-          console.error("❌ API fetch failed:", text);
+          console.error("❌ Backend fetch error:", text);
           return true;
         }
 
         const data = await res.json();
-        console.log("📦 API data:", data);
+        console.log("📦 Backend API data:", data);
 
         if (!data.employee_role || data.employee_role === "権限なし") {
-          console.warn("🚫 No valid role or role is '権限なし'");
+          console.warn("🚫 Role is invalid or missing");
           return true;
         }
 
@@ -96,29 +97,31 @@ export const authConfig: NextAuthConfig = {
         user.employee_number = data.employee_number;
         user.employee_name = data.employee_name;
 
-        console.log("✅ User enriched:", user);
+        console.log("✅ User enriched from backend:", user);
 
         return true;
-      } catch (error) {
-        console.error("❌ signIn callback error:", error);
+      } catch (err) {
+        console.error("❌ signIn callback exception:", err);
         return true;
       }
     },
 
     async jwt({ token, user, account }) {
-      console.log("🔐 jwt callback triggered");
+      console.log("🔐 [jwt] triggered");
       console.log("📨 account:", account);
       console.log("👤 user:", user);
       console.log("🔑 token before:", token);
 
-      if (account) {
-        const decoded = account.id_token
-          ? (jwt.decode(account.id_token) as JwtPayload)
-          : null;
-
+      if (account?.id_token) {
+        const decoded = jwt.decode(account.id_token) as JwtPayload;
         console.log("🧾 Decoded id_token:", decoded);
 
+        token.email = decoded?.email ?? decoded?.preferred_username ?? null;
         token.emailVerified = decoded?.email_verified ?? null;
+        token.sub = decoded?.sub ?? account.providerAccountId;
+      }
+
+      if (account) {
         token.accessToken = account.access_token;
         token.refreshToken = account.refresh_token;
         token.expiresAt = account.expires_in
@@ -134,16 +137,16 @@ export const authConfig: NextAuthConfig = {
       }
 
       if (token.expiresAt && Date.now() >= token.expiresAt && token.refreshToken) {
-        console.log("⏳ Token expired, attempting refresh...");
+        console.log("⏳ Access token expired — attempting refresh...");
         const refreshed = await refreshAccessToken(token.refreshToken);
 
         if (refreshed) {
-          console.log("✅ Token refreshed");
+          console.log("✅ Access token refreshed");
           token.idToken = refreshed.idToken;
           token.accessToken = refreshed.accessToken;
           token.expiresAt = refreshed.expiresAt;
         } else {
-          console.error("❌ Failed to refresh token");
+          console.error("❌ Failed to refresh access token");
           token.error = "FAILED_TO_REFRESH_ACCESS_TOKEN";
         }
       }
@@ -153,13 +156,13 @@ export const authConfig: NextAuthConfig = {
     },
 
     async session({ session, token }) {
-      console.log("💼 session callback triggered");
+      console.log("💼 [session] triggered");
       console.log("🪪 token:", token);
 
       session.user = {
-        id: token.sub!,
+        id: token.sub ?? "unknown",
         name: token.employee_name || token.name || "不明なユーザー",
-        email: token.email!,
+        email: token.email ?? "undefined@example.com",
         emailVerified: token.emailVerified === true ? new Date() : null,
         role: token.role ?? "",
         location_id: token.location_id ?? 0,
@@ -169,7 +172,7 @@ export const authConfig: NextAuthConfig = {
 
       session.error = token.error ?? null;
 
-      console.log("📤 session:", session);
+      console.log("📤 Final session:", session);
 
       return session;
     },
